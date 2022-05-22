@@ -1,0 +1,96 @@
+import boto3
+import io
+import json
+import paramiko
+
+DESTHOST = "${desthost}"
+DESTPORT = int("${destport}")
+PROXYJUMPHOST = "${proxyjumphost}"
+PROXYJUMPPORT = int("${proxyjumpport}")
+SSHKEYSECRETID = "${sshkeysecretid}"
+USERNAME = "${username}"
+
+
+def log(string):
+    print(string)
+
+
+def get_ssh_key_file(context):
+    if context == 'local_test':
+        file_obj = open("synds-ssh-key")
+    else:
+        client = boto3.client('secretsmanager')
+        response = client.get_secret_value(
+            SecretId=SSHKEYSECRETID
+        )
+        file_obj = io.StringIO(response['SecretString'])
+
+    return file_obj
+
+
+def get_ssh_client(context):
+    ssh_key = get_ssh_key_file(context)
+
+    k = paramiko.Ed25519Key.from_private_key(ssh_key)
+
+    if PROXYJUMPHOST != "":
+        print(f"Connecting to {USERNAME}@{PROXYJUMPHOST}:{PROXYJUMPPORT}")
+        jumpbox = paramiko.SSHClient()
+        jumpbox.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        jumpbox.connect(hostname=PROXYJUMPHOST, port=PROXYJUMPPORT,
+                        username=USERNAME, pkey=k)
+
+        jumpbox_transport = jumpbox.get_transport()
+        src_addr = (PROXYJUMPHOST, 4222)
+        dest_addr = (DESTHOST, 4222)
+        jumpbox_channel = jumpbox_transport.open_channel(
+            "direct-tcpip", dest_addr, src_addr)
+    else:
+        jumpbox_channel = None
+
+    print(f"Connecting to {USERNAME}@{DESTHOST}:{DESTPORT} via proxy")
+    target = paramiko.SSHClient()
+    target.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    target.connect(hostname=DESTHOST, port=DESTPORT,
+                   username=USERNAME, pkey=k, sock=jumpbox_channel)
+
+    return target
+
+
+def execute_ssh_command(client, command):
+    log("Executing {}".format(command))
+    stdin, stdout, stderr = client.exec_command(command)
+    outstr = stdout.read().decode('utf-8')
+    errstr = stderr.read().decode('utf-8')
+    return outstr, errstr
+
+
+def validate_event(event):
+    if type(event) is not dict:
+        raise Exception(json.dumps('Event is not of type dict'))
+
+    if 'command' not in event:
+        raise Exception(json.dumps('Event does not include command to run'))
+
+
+def lambda_handler(event, context):
+    log("Event received: {0}".format(event))
+    validate_event(event)
+
+    command = event['command']
+
+    try:
+        client = get_ssh_client(context)
+
+        try:
+            stdout, stderr = execute_ssh_command(client, command)
+        finally:
+            client.close()
+    finally:
+        client.close()
+
+    output = {
+        'stdout': stdout,
+        'stderr': stderr
+    }
+    return output

@@ -1,0 +1,5 @@
+discord_public_key   = "xxxxxxx"
+ssh_destination_host = "xxxxxxx"
+ssh_destination_port = 4222
+ssh_proxy_host       = "xxxxxxx"
+ssh_proxy_port       = 4222

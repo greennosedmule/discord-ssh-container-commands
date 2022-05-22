@@ -1,0 +1,45 @@
+from nacl.signing import VerifyKey
+from nacl.exceptions import BadSignatureError
+import re
+
+DISCORD_PUBLIC_KEY = '${discord_public_key}'
+
+
+def verify_signature(event):
+    raw_body = event.get("rawBody")
+    if 'x-signature-ed25519' not in event['params']['header']:
+        raise Exception(f"Request does not contain ed25519 key")
+    auth_sig = event['params']['header']['x-signature-ed25519']
+
+    if 'x-signature-timestamp' not in event['params']['header']:
+        raise Exception(f"Request does not contain timestamp")
+    auth_ts = event['params']['header']['x-signature-timestamp']
+
+    message = auth_ts.encode() + raw_body.encode()
+    verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+    try:
+        verify_key.verify(message, bytes.fromhex(auth_sig)
+                          )  # raises an error if unequal
+    except Exception as e:
+        raise Exception(f"Invalid request signature: {e}")
+    print("Signature verified")
+
+
+def verify_event(event):
+    if "rawBody" not in event or "params" not in event:
+        raise Exception("Malformed request: {0}".format(event))
+
+
+def lambda_handler(event, context):
+    print("Event received: {0}".format(event))
+
+    verify_event(event)
+
+    # verify the signature
+    verify_signature(event)
+
+    payload = {
+        "authorized": True
+    }
+
+    return payload

@@ -1,0 +1,111 @@
+import boto3
+import json
+
+LAMBDA_SSH_ARN = '${ssh_arn}'
+
+ALLOWED_ACTIONS = {
+    'icecast-alex': ['status', 'start', 'stop']
+}
+
+DOCKER_COMMANDS = {
+    'start': 'sudo /usr/local/bin/docker start {0}',
+    'stop': 'sudo /usr/local/bin/docker stop {0}',
+    'status': 'sudo /usr/local/bin/docker inspect {0}',
+}
+
+
+lambda_client = boto3.client('lambda')
+
+
+def log(string):
+    print(string)
+
+
+def get_request_options(event):
+    if 'container_name' not in event or 'action' not in event:
+        raise Exception(json.dumps(
+            'Event does not include container_name and action'))
+
+    container_name = event['container_name']
+    action = event['action']
+
+    if container_name not in ALLOWED_ACTIONS:
+        raise Exception(json.dumps(
+            f"Container \"{container_name}\" not in allowlist."))
+
+    if action not in ALLOWED_ACTIONS[container_name]:
+        raise Exception(json.dumps(
+            f"Action \"{action}\" not in allowlist for container."))
+
+    return container_name, action
+
+
+def execute_ssh_command(command):
+    payload = {'command': command}
+
+    response = lambda_client.invoke(
+        FunctionName=LAMBDA_SSH_ARN,
+        InvocationType='RequestResponse',
+        Payload=json.dumps(payload)
+    )
+
+    responseFromSSH = json.load(response['Payload'])
+    stdout = responseFromSSH.get('stdout')
+    stderr = responseFromSSH.get('stderr')
+
+    if stderr != "":
+        raise f"Error running SSH command: {stderr}"
+
+    return stdout
+
+
+def start_command(container):
+    return DOCKER_COMMANDS['start'].format(container)
+
+
+def stop_command(container):
+    return DOCKER_COMMANDS['stop'].format(container)
+
+
+def status_command(container):
+    return DOCKER_COMMANDS['status'].format(container)
+
+
+def start_container(container):
+    response = execute_ssh_command(start_command(container))
+    return response
+
+
+def stop_container(container):
+    response = execute_ssh_command(stop_command(container))
+    return response
+
+
+def container_status(container):
+    response = execute_ssh_command(status_command(container))
+    return response
+
+
+def container_action(container, action):
+    print(f"Performing action \"{action}\" on container \"{container}\"")
+    try:
+        if action == 'status':
+            response = container_status(container)
+        elif action == 'start':
+            response = start_container(container)
+        elif action == 'stop':
+            response = stop_container(container)
+    except Exception as error:
+        raise Exception(
+            f"Error performing {action} on {container}: \"{str(error)}\"")
+    return response
+
+
+def lambda_handler(event, context):
+    log(f"Event received: {event}")
+
+    container_name, action = get_request_options(event)
+
+    result = container_action(container_name, action)
+    log(f"Result: \"{result}\"")
+    return result

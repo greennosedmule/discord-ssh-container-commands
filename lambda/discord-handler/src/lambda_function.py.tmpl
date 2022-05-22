@@ -1,0 +1,112 @@
+import boto3
+import json
+
+AWS_REGION = '${aws_region}'
+LAMBDA_AUTHORIZER_ARN = '${authorizer_arn}'
+SQS_QUEUE_URL = '${sqs_queue_url}'
+
+RESPONSE_TYPES = {
+    # ACK a Ping
+    "PONG": 1,
+    "ACK_NO_SOURCE": 2,
+    "MESSAGE_NO_SOURCE": 3,
+    # respond to an interaction with a message
+    "MESSAGE_WITH_SOURCE": 4,
+    # ACK an interaction and edit a response later, the user sees a loading state
+    "ACK_WITH_SOURCE": 5,
+    # for components, ACK an interaction and edit the original message later; the user does not see a loading state
+    "DEFERRED_UPDATE_MESSAGE": 6,
+    # for components, edit the message the component was attached to
+    "UPDATE_MESSAGE": 7,
+    # respond to an autocomplete interaction with suggested choices
+    "APPLICATION_COMMAND_AUTOCOMPLETE_RESULT": 8,
+    # respond to an interaction with a popup modal
+    "MODAL": 9,
+}
+PING_PONG_RESPONSE = {"type": RESPONSE_TYPES['PONG']}
+
+lambda_client = boto3.client('lambda')
+sqs_client = boto3.client('sqs', region_name=AWS_REGION)
+
+
+def log(string):
+    print(string)
+
+
+def is_ping(event):
+    if event['body-json'].get('type') == RESPONSE_TYPES['PONG']:
+        return True
+    return False
+
+
+def verify_signature(event):
+    try:
+        response = lambda_client.invoke(
+            FunctionName=LAMBDA_AUTHORIZER_ARN,
+            InvocationType='RequestResponse',
+            Payload=json.dumps(event)
+        )
+
+        payload = json.load(response['Payload'])
+        print(f"Received payload from authorizer: \"{payload}\"")
+
+        if 'errorMessage' in payload:
+            raise Exception(payload['errorMessage'])
+
+        if payload.get('authorized'):
+            return True
+        return False
+
+    except Exception as e:
+        raise Exception(f"[UNAUTHORIZED] Unable to verify signature: {e}")
+
+
+def get_event_command(event):
+    resource = event['body-json'].get('name', "NullResource")
+    options = event['body-json'].get('options', {})
+    parameters = [option['value'] for option in options]
+
+    return resource, parameters
+
+
+def deferred_response(message):
+    response = {
+        'type': RESPONSE_TYPES['ACK_WITH_SOURCE'],
+        'data': {
+            'content': message,
+            'flags': 1 << 6,
+        },
+    }
+    return response
+
+
+def invoke_lambda_through_sqs(event):
+    msg_payload = json.dumps({'event': event})
+    # msg_attributes = {}
+
+    response = sqs_client.send_message(
+        QueueUrl=SQS_QUEUE_URL,
+        # MessageAttributes=msg_attributes,
+        MessageBody=msg_payload
+    )
+
+    log(f"Send SQS message to responder lambda: \"{response}\"")
+
+    return response
+
+
+def lambda_handler(event, context):
+    log("Event received: {0}".format(event))
+
+    verify_signature(event)
+
+    if is_ping(event):
+        return PING_PONG_RESPONSE
+
+    invoke_lambda_through_sqs(event)
+
+    resource, parameters = get_event_command(event)
+    initial_message = f"/{resource} {' '.join(parameters)}"
+    response = deferred_response(initial_message)
+
+    return response

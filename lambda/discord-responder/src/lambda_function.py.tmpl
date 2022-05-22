@@ -1,0 +1,175 @@
+import boto3
+import json
+import requests
+
+LAMBDA_CONTAINER_ARN = '${container_arn}'
+
+RESPONSE_TYPES = {
+    "PONG": 1,  # ACK a Ping
+    # respond to an interaction with a message
+    "CHANNEL_MESSAGE_WITH_SOURCE": 4,
+    # ACK an interaction and edit a response later, the user sees a loading state
+    "DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE": 5,
+    # for components, ACK an interaction and edit the original message later; the user does not see a loading state
+    "DEFERRED_UPDATE_MESSAGE": 6,
+    # for components, edit the message the component was attached to
+    "UPDATE_MESSAGE": 7,
+    # respond to an autocomplete interaction with suggested choices
+    "APPLICATION_COMMAND_AUTOCOMPLETE_RESULT": 8,
+    # respond to an interaction with a popup modal
+    "MODAL": 9,
+}
+
+
+lambda_client = boto3.client('lambda')
+
+
+def log(message):
+    print(message)
+
+
+def invoke_container_lambda(container_name, action):
+    lambda_payload = {
+        'container_name': container_name,
+        'action': action,
+    }
+    response = lambda_client.invoke(
+        FunctionName=LAMBDA_CONTAINER_ARN,
+        InvocationType='RequestResponse',
+        Payload=json.dumps(lambda_payload)
+    )
+    response_payload = json.load(response['Payload'])
+    return response_payload
+
+
+def unwrap_sqs_message(event):
+    body = json.loads(event['Records'][0]['body'])
+    payload = body['event']['body-json']
+    return payload
+
+
+def get_discord_token(event):
+    token = event['token']
+    application_id = event['application_id']
+    return application_id, token
+
+
+def get_event_options(event):
+    log("Received event: \"{}\"".format(event))
+    payload = event['data']['options']
+    options = {option['name']: option['value'] for option in payload}
+
+    log("Received options: \"{}\"".format(options))
+    return options
+
+
+def replace_original_message(message, application_id, token):
+    url = f"https://discord.com/api/v10/webhooks/{application_id}/{token}/messages/@original"
+
+    payload = {
+        'content': message
+    }
+
+    response = requests.patch(url, json=payload)
+    return response
+
+
+def update_original_message(message, application_id, token):
+    original_message = get_original_message(application_id, token)
+    new_message = original_message + '\n' + message
+    replace_original_message(new_message, application_id, token)
+
+
+def get_original_message(application_id, token):
+    url = f"https://discord.com/api/v10/webhooks/{application_id}/{token}/messages/@original"
+    response = requests.get(url)
+    check_http_response(response)
+    if 'application/json' in response.headers.get('Content-Type', ''):
+        message = response.json()['content']
+    else:
+        raise Exception(
+            "Unable to read original message from Discord: response not JSON")
+    return message
+
+
+def send_new_message(message, application_id, token):
+    url = f"https://discord.com/api/v10/webhooks/{application_id}/{token}"
+
+    payload = {
+        'content': message,
+        'flags': 1 << 6,
+    }
+
+    response = requests.post(url, json=payload)
+    return response
+
+
+def check_http_response(response: requests.Response):
+    if not (200 <= response.status_code < 300):
+        raise Exception(
+            f"Request failed with error {response.status_code} \"{response.reason}\"")
+
+    return True
+
+
+def check_lambda_response(response):
+    if isinstance(response, dict):
+        if response.get('errorType') == 'Exception':
+            error = response.get(
+                'errorMessage', 'An error occurred in the synds-container-sss lambda')
+            raise Exception(error)
+    return True
+
+
+def get_container_status(container_name):
+    raw_response = invoke_container_lambda(container_name, 'status')
+    check_lambda_response(raw_response)
+    response = json.loads(raw_response)
+    status = response[0]['State']['Status']
+    return status
+
+
+def perform_container_action(container_name, action):
+    raw_response = invoke_container_lambda(container_name, action)
+    check_lambda_response(raw_response)
+    return raw_response
+
+
+def lambda_handler(event, context):
+    payload = unwrap_sqs_message(event)
+    application_id, token = get_discord_token(payload)
+
+    options = get_event_options(payload)
+    container_name = options['container_name']
+    action = options['action']
+
+    try:
+        initial_status = get_container_status(container_name)
+    except Exception as error:
+        message = f"Error getting initial container status: \"{str(error)}\""
+        replace_original_message(message, application_id, token)
+
+    message = f"Container {container_name} is currently {initial_status}"
+    replace_original_message(message, application_id, token)
+
+    if action not in ['start', 'stop']:
+        return
+
+    try:
+        perform_container_action(container_name, action)
+    except Exception as error:
+        message = f"Error performing {action} on container: \"{str(error)}\""
+        update_original_message(message, application_id, token)
+
+    update_original_message(
+        f"Sent {action} command to container {container_name}", application_id, token)
+
+    try:
+        final_status = get_container_status(container_name)
+    except Exception as error:
+        message = f"Error getting final container status: \"{str(error)}\""
+        update_original_message(message, application_id, token)
+
+    message = f"Container {container_name} is now {final_status}"
+    update_original_message(message, application_id, token)
+    update_original_message('[done]', application_id, token)
