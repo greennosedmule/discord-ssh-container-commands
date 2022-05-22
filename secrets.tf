@@ -1,5 +1,6 @@
 resource "aws_secretsmanager_secret" "ssh_key" {
-  name = "${var.resource_prefix}ssh-key"
+  name                    = "${var.resource_prefix}ssh-key"
+  recovery_window_in_days = 0 # Set to 0 to facilitate recreation in Terraform
 }
 
 
