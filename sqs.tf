@@ -1,21 +1,14 @@
 resource "aws_sqs_queue" "discord_requests" {
   name                       = "${var.resource_prefix}Discord-Requests"
   visibility_timeout_seconds = 120 # needs to match lambda trigger
-  # delay_seconds             = 90
-  # max_message_size          = 2048
-  # message_retention_seconds = 86400
-  # receive_wait_time_seconds = 10
-  # redrive_policy = jsonencode({
-  #   deadLetterTargetArn = aws_sqs_queue.terraform_queue_deadletter.arn
-  #   maxReceiveCount     = 4
-  # })
-  # redrive_allow_policy = jsonencode({
-  #   redrivePermission = "byQueue",
-  #   sourceQueueArns   = [aws_sns_topic.discord_requests.arn]
-  # })
+}
 
 
-  ### *** TODO *** HOW DO WE ADD A LAMBDA TRIGGER? ###
+resource "aws_lambda_event_source_mapping" "sqs_requests_to_lambda_responder" {
+  enabled          = true
+  event_source_arn = aws_sqs_queue.discord_requests.arn
+  function_name    = aws_lambda_function.discord_responder.arn
+  batch_size       = 1
 }
 
 
